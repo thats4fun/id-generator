@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -39,6 +40,11 @@ func NewIDStore() (*IDStore, error) {
 	}
 	store.file = file
 
+	if err := lockFile(store.file); err != nil {
+		log.Fatal(err)
+	}
+	defer unlockFile(store.file)
+
 	// load existing IDs from the file
 	if err := store.loadFromFile(); err != nil {
 		return nil, err
@@ -50,6 +56,11 @@ func NewIDStore() (*IDStore, error) {
 func (store *IDStore) GetId() string {
 	store.m.Lock()
 	defer store.m.Unlock()
+
+	if err := lockFile(store.file); err != nil {
+		log.Fatal(err)
+	}
+	defer unlockFile(store.file)
 
 	var id string
 
@@ -74,6 +85,11 @@ func (store *IDStore) FreeId(id string) error {
 	store.m.Lock()
 	defer store.m.Unlock()
 
+	if err := lockFile(store.file); err != nil {
+		return err
+	}
+	defer unlockFile(store.file)
+
 	if _, exists := store.data[id]; exists {
 		delete(store.data, id)
 
@@ -94,6 +110,11 @@ func (store *IDStore) Close() {
 func (store *IDStore) loadFromFile() error {
 	store.m.Lock()
 	defer store.m.Unlock()
+
+	if err := lockFile(store.file); err != nil {
+		log.Fatal(err)
+	}
+	defer unlockFile(store.file)
 
 	_, err := store.file.Seek(0, 0)
 	if err != nil {
@@ -123,7 +144,16 @@ func (store *IDStore) saveToFile(id string) error {
 	return nil
 }
 
+// TODO: potential performance bottleneck
 func (store *IDStore) rewriteFile() error {
+	if err := store.file.Truncate(0); err != nil {
+		return err
+	}
+
+	if _, err := store.file.Seek(0, 0); err != nil {
+		return err
+	}
+
 	for id := range store.data {
 		_, err := store.file.WriteString(id + "\n")
 		if err != nil {
@@ -137,4 +167,14 @@ func (store *IDStore) rewriteFile() error {
 	}
 
 	return nil
+}
+
+// Lock the file before performing any operation
+func lockFile(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
+}
+
+// Unlock the file after operation is done
+func unlockFile(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
 }
