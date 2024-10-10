@@ -30,7 +30,8 @@ func NewIDStore() (*IDStore, error) {
 
 	dir, err := os.Getwd()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return nil, err
 	}
 	filePath := filepath.Join(dir, fileName)
 
@@ -41,7 +42,8 @@ func NewIDStore() (*IDStore, error) {
 	store.file = file
 
 	if err := lockFile(store.file); err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return nil, err
 	}
 	defer unlockFile(store.file)
 
@@ -58,7 +60,8 @@ func (store *IDStore) GetId() string {
 	defer store.m.Unlock()
 
 	if err := lockFile(store.file); err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return ""
 	}
 	defer unlockFile(store.file)
 
@@ -75,7 +78,8 @@ func (store *IDStore) GetId() string {
 	}
 
 	if err := store.saveToFile(id); err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return ""
 	}
 
 	return id
@@ -104,7 +108,11 @@ func (store *IDStore) FreeId(id string) error {
 }
 
 func (store *IDStore) Close() {
-	store.file.Close()
+	err := store.file.Close()
+	if err != nil {
+		log.Println(err)
+		return
+	}
 }
 
 func (store *IDStore) loadFromFile() error {
@@ -112,7 +120,8 @@ func (store *IDStore) loadFromFile() error {
 	defer store.m.Unlock()
 
 	if err := lockFile(store.file); err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return err
 	}
 	defer unlockFile(store.file)
 
