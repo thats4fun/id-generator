@@ -1,54 +1,48 @@
 package internal
 
 import (
-	"bufio"
+	"database/sql"
 	"errors"
+	"fmt"
 	"log"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
-	fileName = "id.data"
+	fileName = "id_store.db"
 )
 
 type IDStore struct {
-	data map[string]struct{}
-	m    sync.Mutex
-	file *os.File
+	db *sql.DB
+	m  sync.Mutex
 }
 
 func NewIDStore() (*IDStore, error) {
-	store := &IDStore{
-		data: make(map[string]struct{}),
-	}
+	store := &IDStore{}
 
-	dir, err := os.Getwd()
+	db, err := sql.Open("sqlite3", fileName)
 	if err != nil {
 		log.Println(err)
 		return nil, err
 	}
-	filePath := filepath.Join(dir, fileName)
+	// TODO: can be configurable
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(50)
 
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0666)
+	_, err = db.Exec("PRAGMA journal_mode = WAL;")
 	if err != nil {
-		return nil, err
-	}
-	store.file = file
-
-	if err := lockFile(store.file); err != nil {
 		log.Println(err)
 		return nil, err
 	}
-	defer unlockFile(store.file)
 
-	// load existing IDs from the file
-	if err := store.loadFromFile(); err != nil {
+	store.db = db
+
+	err = store.createTableIfNotExists()
+	if err != nil {
+		log.Println(err)
 		return nil, err
 	}
 
@@ -59,25 +53,25 @@ func (store *IDStore) GetId() string {
 	store.m.Lock()
 	defer store.m.Unlock()
 
-	if err := lockFile(store.file); err != nil {
-		log.Println(err)
-		return ""
-	}
-	defer unlockFile(store.file)
-
 	var id string
 
 	for {
 		id = uuid.NewString()
 
-		// check if the ID is unique in the map
-		if _, exists := store.data[id]; !exists {
-			store.data[id] = struct{}{}
+		// Check if the ID is unique in the table
+		exists, err := store.exists(id)
+		if err != nil {
+			log.Println(err)
+			return ""
+		}
+		if !exists {
 			break
 		}
 	}
 
-	if err := store.saveToFile(id); err != nil {
+	// Save the new ID to the database
+	err := store.saveToDB(id)
+	if err != nil {
 		log.Println(err)
 		return ""
 	}
@@ -89,101 +83,70 @@ func (store *IDStore) FreeId(id string) error {
 	store.m.Lock()
 	defer store.m.Unlock()
 
-	if err := lockFile(store.file); err != nil {
+	exists, err := store.exists(id)
+	if err != nil {
 		return err
 	}
-	defer unlockFile(store.file)
-
-	if _, exists := store.data[id]; exists {
-		delete(store.data, id)
-
-		if err := store.rewriteFile(); err != nil {
-			return err
-		}
-
-		return nil
+	if !exists {
+		return errors.New("ID not found")
 	}
 
-	return errors.New("ID not found")
+	// Delete the ID from the database
+	err = store.deleteFromDB(id)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (store *IDStore) Close() {
-	err := store.file.Close()
+	err := store.db.Close()
 	if err != nil {
 		log.Println(err)
-		return
 	}
 }
 
-func (store *IDStore) loadFromFile() error {
-	store.m.Lock()
-	defer store.m.Unlock()
+func (store *IDStore) createTableIfNotExists() error {
+	query := `
+	CREATE TABLE IF NOT EXISTS ids (
+		id TEXT PRIMARY KEY
+	)`
+	_, err := store.db.Exec(query)
+	return err
+}
 
-	if err := lockFile(store.file); err != nil {
-		log.Println(err)
-		return err
+func (store *IDStore) exists(id string) (bool, error) {
+	query := `SELECT 1 FROM ids WHERE id = ? LIMIT 1`
+
+	var exists int
+	err := store.db.QueryRow(query, id).Scan(&exists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
 	}
-	defer unlockFile(store.file)
 
-	_, err := store.file.Seek(0, 0)
+	return exists == 1, nil
+}
+
+func (store *IDStore) saveToDB(id string) error {
+	tx, err := store.db.Begin()
 	if err != nil {
 		return err
 	}
 
-	scanner := bufio.NewScanner(store.file)
-	for scanner.Scan() {
-		id := strings.TrimSpace(scanner.Text())
-		if id != "" {
-			store.data[id] = struct{}{}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	query := `INSERT INTO ids (id) VALUES (?)`
+	_, err = tx.Exec(query, id)
+	if err != nil {
+		rollbackErr := tx.Rollback()
+		err = fmt.Errorf("transaction exec failed: %w", rollbackErr)
 		return err
 	}
 
-	return nil
+	return tx.Commit()
 }
 
-func (store *IDStore) saveToFile(id string) error {
-	if _, err := store.file.WriteString(id + "\n"); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// TODO: potential performance bottleneck
-func (store *IDStore) rewriteFile() error {
-	if err := store.file.Truncate(0); err != nil {
-		return err
-	}
-
-	if _, err := store.file.Seek(0, 0); err != nil {
-		return err
-	}
-
-	for id := range store.data {
-		_, err := store.file.WriteString(id + "\n")
-		if err != nil {
-			return err
-		}
-	}
-
-	// ensure the file is flushed
-	if err := store.file.Sync(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Lock the file before performing any operation
-func lockFile(file *os.File) error {
-	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
-}
-
-// Unlock the file after operation is done
-func unlockFile(file *os.File) error {
-	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
+func (store *IDStore) deleteFromDB(id string) error {
+	query := `DELETE FROM ids WHERE id = ?`
+	_, err := store.db.Exec(query, id)
+	return err
 }

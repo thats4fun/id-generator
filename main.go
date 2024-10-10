@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/thats4fun/dasda/internal"
+	"github.com/thats4fun/id-generator/internal"
 )
 
 func main() {
@@ -15,7 +15,8 @@ func main() {
 
 	store, err := internal.NewIDStore()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 	defer store.Close()
 
@@ -25,15 +26,17 @@ func main() {
 		fmt.Println(id)
 	case "freeid":
 		if len(os.Args) != 3 {
-			log.Fatal("Usage: freeid <ID>")
+			log.Println("Usage: freeid <ID>")
+			return
 		}
 		id := os.Args[2]
 		err := store.FreeId(id)
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
+			return
 		}
 		fmt.Printf("ID %s freed\n", id)
 	default:
-		log.Fatalf("Unknown command: %s\n", os.Args[1])
+		log.Printf("Unknown command: %s\n", os.Args[1])
 	}
 }
